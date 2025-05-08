@@ -1,0 +1,6 @@
+uproot>=5.0
+matplotlib>=3.5
+numpy>=1.21
+scipy>=1.7
+prompt_toolkit>=3.0
+# seaborn>=0.11
