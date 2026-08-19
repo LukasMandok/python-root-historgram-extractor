@@ -82,48 +82,61 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
     # Determine defaults based on key
     if key == "limits":
         # Default limits based on combined range of all histograms
-        all_limits = []
-        for h in hist_list:
-            axis_limits = extract_axis_limits(h)
-            if not all_limits:
-                all_limits = [[lim] for lim in axis_limits] # Initialize with first hist's limits
-            else:
-                for i, lims in enumerate(axis_limits):
-                    if i < len(all_limits):
-                         all_limits[i].append(lims)
-                    else:
-                         all_limits.append([lims]) # Should not happen if types are consistent
-
-        # Combine limits: min of mins, max of maxes for each axis
-        combined_limits = []
-        for axis_lims_list in all_limits:
-            valid_mins = [l[0] for l in axis_lims_list if l and l[0] is not None]
-            valid_maxes = [l[1] for l in axis_lims_list if l and l[1] is not None]
-            min_val = min(valid_mins) if valid_mins else None
-            max_val = max(valid_maxes) if valid_maxes else None
-            combined_limits.append((min_val, max_val))
-        default_value = combined_limits
+        limits = None
+        if current_value is None:
+            for hist in hist_list:
+                limits_next = extract_axis_limits(hist)
+                if limits is None:
+                    limits = limits_next
+                else:
+                    limits = [(i[0] if i[0] < j[0] else j[0], i[1] if i[1] > j[1] else j[1]) 
+                              for i, j in zip(limits, limits_next)]
+        default_value = limits
         used = is_th1 or is_th2 or is_th3 or is_tgraph or is_tf1 # Generally used
-
+        
     elif key == "x-label":
         default_value = convert_to_latex(getMember(getMember(hist, "fXaxis"), "fTitle", ""))
+        used = True
     elif key == "y-label":
         default_value = convert_to_latex(getMember(getMember(hist, "fYaxis"), "fTitle", ""))
+        used = True
     elif key == "z-label":
         used = is_th3
-        default_value = convert_to_latex(getMember(getMember(hist, "fZaxis"), "fTitle", "")) if used else None
-    elif key == "x-log": used = not is_categorical # Log scale not typical for categorical
-    elif key == "y-log": pass # Always potentially usable
-    elif key == "z-log": used = is_th2 or is_th3 # Only for TH2 (color) or TH3 (color)
-    elif key == "title": default_value = getattr(hist, 'title', '')
-    elif key == "legend": default_value = (count > 1 or bool(get_config("models"))) # Default true if multiple hists or models
+        if used:
+            default_value = convert_to_latex(getMember(getMember(hist, "fZaxis"), "fTitle", "").split(';')[0].strip())
+    elif key == "x-log":
+        used = not is_categorical # Adopt from newer code - log scale not typical for categorical
+        default_value = False
+    elif key == "y-log": 
+        default_value = False
+    elif key == "z-log": 
+        used = is_th2 or is_th3
+        default_value = False
+    elif key == "title": 
+        default_value = getattr(hist, 'title', '')
+    elif key == "legend": 
+        if is_th1:
+            default_value = count > 1 or bool(get_config("models", []))
+        elif is_th2 or is_th3:
+            default_value = True
+        else:
+            default_value = count > 1
     elif key == "names":
         default_value = [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)]
-        used = get_config("legend", False) or (get_config("stats", False) and count > 1)
-    elif key == "stats": used = is_th1 or is_th2 # TH3 stats less common in this style
-    elif key == "grid": used = not is_th2 # Grid less common for TH2 pcolormesh
-    elif key == "lines": used = is_th3 # Specific to TH3 polyline drawing (if implemented)
-    elif key == "errors": used = is_th1 or is_tgraph
+        used = (is_th1 or is_tgraph or is_tf1) and \
+               (get_config("legend", False) or (get_config("stats", False) and count > 1))
+    elif key == "stats": 
+        used = is_th1 or is_th2 or is_tgraph or is_tf1
+        default_value = False
+    elif key == "grid": 
+        used = not is_th2  # Grid not common for TH2 pcolormesh
+        default_value = is_th3 
+    elif key == "lines": 
+        used = is_th3
+        default_value = True
+    elif key == "errors": 
+        used = is_th1 or is_tgraph
+        default_value = False
     elif key == "colors":
         if is_th1 or is_tgraph or is_tf1:
             # Default colors for multiple lines/markers
@@ -131,44 +144,61 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
             default_value = list(color_list.keys())[:num_items]
         elif is_th2 or is_th3:
             # Default colormap for 2D/3D
-            default_value = [color_maps[0]] # Use list for consistency, plotting takes first
+            default_value = color_maps[0]  # Use first colormap
     elif key == "palette":
-        used = is_th1 or is_tgraph or is_tf1 # Only relevant when using named colors
+        used = is_th1 or is_tgraph or is_tf1
         default_value = list(color_palettes.keys())[0] if used else None
     elif key == "alphas":
-        num_items = count + len(get_config("models", []))
-        default_value = [1.0] * num_items
-        used = is_th1 or is_th3 or is_tgraph or is_tf1 # Where alpha makes sense
-    elif key == "flat": used = is_th3
-    elif key == "raster": used = is_th2 or is_th3
-    elif key == "angles": used = is_th3; default_value = [30, -60]
-    elif key == "thickness": used = is_th1 or is_tgraph or is_tf1; default_value = 1.5
-    elif key == "models": used = is_th1 or is_tgraph or is_tf1 # Models typically for 1D
-    elif key == "model-params": used = is_th1 or is_tgraph or is_tf1
-    elif key == "cutoff": used = is_th1 and not is_categorical # Cutoff for numerical TH1
-    elif key == "model-stats": used = bool(get_config("models")) # Used if models are active
+        used = is_th1 or is_th3 or is_tgraph or is_tf1
+        default_value = [1.0 for _ in range(count + len(get_config("models", [])))] if used else None
+    elif key == "flat": 
+        used = is_th3
+        default_value = False
+    elif key == "raster": 
+        used = is_th2 or is_th3
+        default_value = True
+    elif key == "angles": 
+        used = is_th3
+        default_value = [15, 45]  # Using the values from the old script
+    elif key == "thickness": 
+        used = is_th1 or is_tgraph
+        default_value = 2.0  # Using the value from the old script
+    elif key == "models": 
+        used = is_th1 or is_tgraph or is_tf1
+        default_value = []
+    elif key == "model-params": 
+        used = is_th1 or is_tgraph or is_tf1
+        default_value = {}
+    elif key == "cutoff": 
+        used = is_th1 and not is_categorical
+        default_value = False
+    elif key == "model-stats": 
+        used = is_th1 and len(get_config("models", [])) > 0
+        default_value = True
 
     # If current_value is None, use the determined default, otherwise keep current_value
     final_value = default_value if current_value is None else current_value
 
     # Special handling for colors/alphas list length
     if key in ["colors", "alphas", "names"]:
-         num_hists = len(hist_list)
-         num_models = len(get_config("models", []))
-         expected_len = num_hists + num_models if key in ["colors", "alphas"] else num_hists
+        num_hists = len(hist_list)
+        num_models = len(get_config("models", []))
+        expected_len = num_hists + num_models if key in ["colors", "alphas"] else num_hists
 
-         if isinstance(final_value, list):
-             if len(final_value) < expected_len:
-                 # Extend with defaults if list is too short
-                 default_element = "blue" if key == "colors" else (1.0 if key == "alphas" else "DefaultName")
-                 final_value.extend([default_element] * (expected_len - len(final_value)))
-             elif len(final_value) > expected_len:
-                 # Truncate if too long
-                 final_value = final_value[:expected_len]
-         elif final_value is None: # Ensure it's a list of correct length if None
-              default_element = "blue" if key == "colors" else (1.0 if key == "alphas" else "DefaultName")
-              final_value = [default_element] * expected_len
-
+        if isinstance(final_value, list):
+            if len(final_value) < expected_len:
+                # Extend with defaults if list is too short
+                default_element = "blue" if key == "colors" else (1.0 if key == "alphas" else "DefaultName")
+                final_value.extend([default_element] * (expected_len - len(final_value)))
+            elif len(final_value) > expected_len:
+                # Truncate if too long
+                final_value = final_value[:expected_len]
+        elif isinstance(final_value, str) and key == "colors" and (is_th2 or is_th3):
+            # Handle case when colormap is provided as string but expected as list for TH2/TH3
+            final_value = [final_value]
+        elif final_value is None:  # Ensure it's a list of correct length if None
+            default_element = "blue" if key == "colors" else (1.0 if key == "alphas" else "DefaultName")
+            final_value = [default_element] * expected_len
 
     # Ensure limits is always a list (even if empty)
     if key == "limits" and final_value is None:
@@ -196,12 +226,13 @@ def request_additional_config(hist_list: List[HistogramType]):
         refresh_config(hist_list) # Ensure defaults and 'used' status are up-to-date
 
         options: Dict[int, Tuple[str, Tuple[type, Optional[type]]]] = {}
-        print(f"\n--- Configure Plot: {green}{get_config('title', 'Untitled')}{reset} ---")
+        print(f"\n--- Configure Plot: {green}{get_config('title', hist.title)}{reset} ---")
         i = 0
         sorted_keys = sorted(config_parameters.keys()) # Display alphabetically
         for key in sorted_keys:
             value, used, hide = config_parameters[key]
-            if not used or (hide and not show_hidden):
+            # Skip if it's hidden and we're not showing hidden, or if it's explicitly marked as not used
+            if (hide and not show_hidden) or not used:
                 continue
 
             # Determine type for input parsing help
@@ -213,14 +244,20 @@ def request_additional_config(hist_list: List[HistogramType]):
                  inner_type = type(next(iter(value.values()))) # Type of first value in dict
 
             options[i] = (key, (outer_type, inner_type))
-            print(f"  {f'({i})':>3} {display_property(key, value)}")
+            print(f"  ({i+1}) {display_property(key, value)}")
             i += 1
 
-        print("\nCommands: (idx) edit, (r) reset all, (h) hist info,")
+        print("\nCommands: (1..i) edit parameter, (r) reset all, (h) hist info,")
         hidden_text = "hide unused" if show_hidden else "show unused"
         print(f"          (e) {hidden_text}, (ENTER) plot, (q) quit")
 
-        input_indices = [str(j) for j in options.keys()]
+        # Debug information to diagnose the issue
+        if len(options) == 0:
+            print(f"\n{red}WARNING: No configuration options available to display.{reset}")
+            print(f"Histogram type: {hist.classname}")
+            print(f"Active options: {', '.join([key for key, (_, used, hide) in config_parameters.items() if used])}")
+        
+        input_indices = [str(j+1) for j in range(len(options))]
         answer = custom_input("Choose command or index: ", keys=["r", "h", "e", "q"] + input_indices)
 
         if answer.strip() == "": break # ENTER -> plot
@@ -250,7 +287,7 @@ def request_additional_config(hist_list: List[HistogramType]):
 
         # --- Edit Parameter ---
         try:
-            idx = int(answer)
+            idx = int(answer) - 1  # Subtract 1 to convert from 1-based to 0-based
             if idx not in options: raise ValueError("Index out of range")
             option_key, option_type_info = options[idx]
             current_value = get_config(option_key)
@@ -557,7 +594,6 @@ def custom_input(message: Optional[str] = "", keys: Optional[List[str]] = []) ->
     def _interrupt(event):
          print("\nInterrupted by user.")
          sys.exit(1)
-
 
     session = PromptSession(key_bindings=bindings)
     try:
@@ -910,3 +946,29 @@ def optimize_svg(svg_file: str) -> None:
         print(f"{red}An unexpected error occurred during SVG optimization: {e}{reset}", file=sys.stderr)
         if os.path.exists(tmp_file):
             os.remove(tmp_file)
+
+
+def display_property(key: str, value: Optional[Any] = None) -> str:
+    """Formats a configuration property for display with colors."""
+    output: str = ""
+    if value is not None:
+        output += f"{blue}{f'{key}:':<10}{red}"
+        if isinstance(value, list):
+            if value and isinstance(value[0], (tuple, list)):
+                formatted = [":".join(map(str, sub)) for sub in value if sub is not None]
+                if len(formatted) > 1:
+                    output += ", ".join(formatted)
+                elif formatted:
+                    output += formatted[0]
+            else:
+                output += ", ".join(map(str, value))
+        elif isinstance(value, bool):
+            output += "yes" if value else "no"
+        elif isinstance(value, dict):
+            output += ", ".join(f"{k}: {v}" for k, v in value.items())
+        else:
+            output += str(value)
+    else:
+        output += f"{blue}{key}"
+    
+    return f"{output}{reset}"

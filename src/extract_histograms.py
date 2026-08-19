@@ -1,9 +1,11 @@
 import os
 import argparse
 import sys
+import re
+import subprocess
 import uproot
 import matplotlib.pyplot as plt
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 # Import from our library
 # Need to adjust sys.path if 'script' is run directly and 'src' is not in PYTHONPATH
@@ -17,7 +19,7 @@ try:
     from lib.utils import (anapath, config_parameters, load_cache, find_histograms,
                          request_additional_config, refresh_config, save_cache,
                          optimize_svg, set_config, get_config, parse_limits, getMember,
-                         set_global_anapath) # Added set_global_anapath
+                         set_global_anapath, display_property) # Added display_property
     from lib.plotting import process_histograms
     from lib.constants import allowed_classes, green, reset, red # Added red for error messages
 except ImportError as e:
@@ -26,7 +28,28 @@ except ImportError as e:
     sys.exit(1)
 
 
-def extract_and_plot(run: Optional[int],
+def parse_run_number(run_str: str) -> Union[int, str]:
+    """
+    Parse a run number that could be either a single number (e.g., "510") 
+    or a range (e.g., "510-515").
+    Returns an int for single run or the original string for a range.
+    """
+    if run_str is None:
+        return None
+        
+    # Check if it's a simple integer
+    if re.match(r'^\d+$', run_str):
+        return int(run_str)
+    
+    # Check if it's a range pattern like "510-515"
+    if re.match(r'^\d+-\d+$', run_str):
+        return run_str  # Return as string for ranges
+    
+    # Invalid format
+    raise ValueError(f"Run number must be a single number or range (e.g., '510' or '510-515'), got '{run_str}'")
+
+
+def extract_and_plot(run: Optional[Union[int, str]],
                      type_name: Optional[str],
                      comment: Optional[str] = None,
                      paths: Optional[List[List[str]]] = None,
@@ -65,7 +88,7 @@ def extract_and_plot(run: Optional[int],
                   return None
              root_file_name = f"histograms_ana_{run}" + (f"-{comment}" if comment else "") + ".root"
              # Use current_anapath which is set by main() via --anapath CLI arg
-             root_path = os.path.join(current_anapath, "data", type_name, root_file_name) # Example path structure
+             root_path = os.path.join(current_anapath, type_name, root_file_name)
              print(f"Using new ROOT file path: {root_path}")
              # Force re-finding histograms unless paths are also cached/provided
              if not paths:
@@ -91,9 +114,15 @@ def extract_and_plot(run: Optional[int],
             print(f"{red}ERROR: --run, --type, and --path are required when not using --edit.{reset}", file=sys.stderr)
             return None
         root_file_name = f"histograms_ana_{run}" + (f"-{comment}" if comment else "") + ".root"
-        # Example path structure, adjust as needed
-        # Use current_anapath which is set by main() via --anapath CLI arg
-        root_path = os.path.join(current_anapath, "data", type_name, root_file_name)
+        # Check first if the file exists directly under type_name directory
+        root_path_direct = os.path.join(current_anapath, type_name, root_file_name)
+        if os.path.exists(root_path_direct):
+            root_path = root_path_direct
+            print(f"DEBUG: Found ROOT file at: {root_path}")
+        else:
+            print(f"{red}ERROR: The data path '{root_path_direct}' is not valid.{reset}", file=sys.stderr)  
+            
+            # print error, that the datapath is not valid:
         matching_keys = [] # Will be found below
 
     # --- Open ROOT File and Find Histograms ---
@@ -115,7 +144,7 @@ def extract_and_plot(run: Optional[int],
                 matching_keys = list(dict.fromkeys(found_keys)) # Remove duplicates while preserving order
 
             print("\nProcessing histogram(s):")
-            hist_list: List[HistogramType] = []
+            hist_list = []
             for key in matching_keys:
                 try:
                     hist = root_file[key]
@@ -134,6 +163,12 @@ def extract_and_plot(run: Optional[int],
             if not hist_list:
                  print(f"{red}ERROR: No valid histograms could be loaded.{reset}", file=sys.stderr)
                  return None
+
+            # Setup names in config if not already set
+            if get_config("names", None) is None:
+                names = [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)]
+                used = get_config("legend", False) or (get_config("stats", False) and len(hist_list) > 1)
+                set_config("names", names, used)
 
             # --- Configuration ---
             # Initial refresh based on loaded histograms
@@ -182,7 +217,6 @@ def extract_and_plot(run: Optional[int],
                  output_filename = "-".join(filename_parts) + ".svg"
                  output_path = os.path.join(output_base_dir, output_filename)
 
-
             print(f"\nSaving plot to: {output_path}")
             try:
                  fig.savefig(output_path, dpi=300, bbox_inches='tight', bbox_extra_artists=extra_artists)
@@ -227,7 +261,7 @@ def main():
     input_group = parser.add_argument_group('Input Data Selection')
     input_group.add_argument("--anapath", type=str, default=None, # Default to None, set_global_anapath handles os.getcwd() if None
                              help="Base path for analysis data and output. If not set, uses current working directory or utils default.")
-    input_group.add_argument("--run", type=int, help="Run number (required unless --edit is used)")
+    input_group.add_argument("--run", type=str, help="Run number (e.g., '510') or range (e.g., '510-515') (required unless --edit is used)")
     input_group.add_argument("--type", help="Data type (e.g., calibration, physics) (required unless --edit is used)")
     input_group.add_argument("--comment", default=None, help="Optional comment for file naming")
     input_group.add_argument("--path", action="append", nargs='+',
@@ -251,7 +285,7 @@ def main():
     plot_group.add_argument("--z-log", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS, dest='z_log', help="Use log scale for Z axis/colorbar")
     plot_group.add_argument("--models", nargs='*', default=argparse.SUPPRESS, help="Model function(s) to overlay (e.g., lifetime, f1)")
     plot_group.add_argument("--model-stats", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS, dest='model_stats', help="Show/hide model fit statistics box")
-
+    plot_group.add_argument("--cutoff", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS, help="Limit histogram data to specified limits")
 
     # --- TH3 Specific Arguments ---
     th3_group = parser.add_argument_group('TH3 Specific Options')
@@ -268,10 +302,34 @@ def main():
 
     args = parser.parse_args()
 
+    # Parse run number (validates and converts to int if it's a single number)
+    if args.run:
+        try:
+            args.run = parse_run_number(args.run)
+        except ValueError as e:
+            print(f"{red}ERROR: {e}{reset}", file=sys.stderr)
+            sys.exit(1)
+
     # Set the global anapath using the provided or default value
     # This needs to be done early, before anapath is used by load_cache or other functions.
     set_global_anapath(args.anapath)
-
+    
+    # Add debug prints to help diagnose path issues
+    print(f"\nDEBUG: Global anapath set to: {anapath}")
+    print(f"DEBUG: Current working directory: {os.getcwd()}")
+    if args.run is not None and args.type is not None:
+        # Handle run range in debug output
+        if isinstance(args.run, str) and '-' in args.run:
+            # For range like "510-515"
+            expected_root_path = os.path.join(anapath, args.type, 
+                                    f"histograms_ana_{args.run}" + (f"-{args.comment}" if args.comment else "") + ".root")
+        else:
+            # For single run number (already converted to int)
+            expected_root_path = os.path.join(anapath, args.type, 
+                                    f"histograms_ana_{args.run}" + (f"-{args.comment}" if args.comment else "") + ".root")
+            
+        print(f"DEBUG: Expected ROOT file path: {expected_root_path}")
+        print(f"DEBUG: File exists: {os.path.exists(expected_root_path)}")
 
     # --- Initialize Configuration ---
     # Start with empty config, defaults will be filled by refresh_config
@@ -283,12 +341,11 @@ def main():
         "z-log": (False, False, True), "limits": (None, True, False), "legend": (None, True, False),
         "stats": (False, True, False), "grid": (None, True, True), "names": (None, False, False),
         "colors": (None, True, False), "palette": (None, False, True), "alphas": (None, True, True),
-        "angles": (None, False, True), "thickness": (None, True, True), "lines": (False, False, True), # 'lines' for TH3 polylines?
+        "angles": (None, False, True), "thickness": (None, True, True), "lines": (False, False, True), 
         "cutoff": (False, False, True), "flat": (False, False, True), "raster": (None, False, True),
         "errors": (False, False, True), "models": ([], False, True), "model-params": ({}, False, True),
-        "model-stats": (True, False, False), "figsize": ((8,6), False, True), # Add figsize
-        "textsize": (12.0, False, True) # Add textsize
-        # Add other potential config keys here with initial (None, False, True)
+        "model-stats": (True, False, False), "figsize": ((8,6), False, True),
+        "textsize": (12.0, False, True)
     }
 
     # Apply command-line arguments to override initial config values
@@ -304,7 +361,6 @@ def main():
                    set_config(config_key, None) # Set to None, refresh_config will get hist title
               else:
                    set_config(config_key, arg_dict[key])
-
 
     # --- Run Extraction and Plotting ---
     output_file = extract_and_plot(args.run, args.type, comment=args.comment, paths=args.path,
