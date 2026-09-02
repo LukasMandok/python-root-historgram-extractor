@@ -8,8 +8,25 @@ version = "0.1.0"
 description = "A project for extracting and plotting histograms from ROOT files."
 readme = "README.md"
 requires-python = ">=3.8"
+dependencies = [
+    "uproot>=5.0",
+    "matplotlib>=3.5",
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "prompt_toolkit>=3.0",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License", # Or your chosen license
     "Operating System :: OS Independent",
 ]
+
+[project.scripts]
+root-histogram-extractor = "extract_histograms:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["extract_histograms"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

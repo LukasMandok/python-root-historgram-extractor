@@ -16,49 +16,16 @@ import sys
 import argparse
 from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 
+from .config import PlotConfig
+
 # Import constants and models from sibling modules
 from .constants import (CACHE_FILE, COMMON_CACHE_BASE_DIR, allowed_classes, color_list, color_palettes,
                        color_maps, reset, red, blue, green, HistogramType)
 from .models import model_functions
 
-# --- Global Configuration Store ---
-# Default anapath to current working directory. Can be overridden by set_global_anapath.
-anapath: str = os.getcwd() 
+# --- Configuration helpers ---
 
-config_parameters: Dict[str, Tuple[Any, bool, bool]] = {} # Stores (value, used_by_current_hist_type, hidden_in_config_menu)
-
-# --- Configuration Management ---
-
-def set_global_anapath(path: Optional[str]) -> None:
-    """
-    Sets the global anapath variable.
-    If a path is provided, anapath is set to that path (resolved to absolute).
-    If path is None, anapath remains its initial value (os.getcwd()).
-    This function should be called early by the main script if an --anapath CLI arg is used.
-    """
-    global anapath
-    if path:
-        anapath = os.path.abspath(path)
-        # print(f"Global anapath has been set to: {anapath}")
-    # else:
-        # print(f"Global anapath remains: {anapath} (no override path provided)")
-
-
-def get_config(key: str, default: Any = None) -> Any:
-    """Gets a configuration value, returning default if not set."""
-    tpl = config_parameters.get(key)
-    # Return the value if the key exists, otherwise the default
-    return tpl[0] if tpl is not None else default
-
-def set_config(key: str, value: Any, used: Optional[bool] = None, hide: Optional[bool] = None) -> None:
-    """Sets or updates a configuration parameter."""
-    current_val, current_used, current_hide = config_parameters.get(key, (None, True, False))
-    # Only update used/hide if explicitly provided
-    new_used = used if used is not None else current_used
-    new_hide = hide if hide is not None else current_hide
-    config_parameters[key] = (value, new_used, new_hide)
-
-def read_config_defaults(hist_list: List[HistogramType], key: str, current_value: Any) -> Tuple[bool, Any]:
+def read_config_defaults(hist_list: List[HistogramType], key: str, current_value: Any, config: PlotConfig) -> Tuple[bool, Any]:
     """
     Determines the default value and applicability ('used') of a config key
     based on the histogram type(s). Returns (used, default_value).
@@ -116,7 +83,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
         default_value = getattr(hist, 'title', '')
     elif key == "legend": 
         if is_th1:
-            default_value = count > 1 or bool(get_config("models", []))
+            default_value = count > 1 or bool(config.get("models", []))
         elif is_th2 or is_th3:
             default_value = True
         else:
@@ -124,7 +91,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
     elif key == "names":
         default_value = [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)]
         used = (is_th1 or is_tgraph or is_tf1) and \
-               (get_config("legend", False) or (get_config("stats", False) and count > 1))
+               (config.get("legend", False) or (config.get("stats", False) and count > 1))
     elif key == "stats": 
         used = is_th1 or is_th2 or is_tgraph or is_tf1
         default_value = False
@@ -140,7 +107,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
     elif key == "colors":
         if is_th1 or is_tgraph or is_tf1:
             # Default colors for multiple lines/markers
-            num_items = count + len(get_config("models", [])) # Total items needing colors
+            num_items = count + len(config.get("models", []) or []) # Total items needing colors
             default_value = list(color_list.keys())[:num_items]
         elif is_th2 or is_th3:
             # Default colormap for 2D/3D
@@ -150,7 +117,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
         default_value = list(color_palettes.keys())[0] if used else None
     elif key == "alphas":
         used = is_th1 or is_th3 or is_tgraph or is_tf1
-        default_value = [1.0 for _ in range(count + len(get_config("models", [])))] if used else None
+        default_value = [1.0 for _ in range(count + len(config.get("models", []) or []))] if used else None
     elif key == "flat": 
         used = is_th3
         default_value = False
@@ -173,7 +140,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
         used = is_th1 and not is_categorical
         default_value = False
     elif key == "model-stats": 
-        used = is_th1 and len(get_config("models", [])) > 0
+        used = is_th1 and len(config.get("models", []) or []) > 0
         default_value = True
 
     # If current_value is None, use the determined default, otherwise keep current_value
@@ -182,7 +149,7 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
     # Special handling for colors/alphas list length
     if key in ["colors", "alphas", "names"]:
         num_hists = len(hist_list)
-        num_models = len(get_config("models", []))
+        num_models = len(config.get("models", []) or [])
         expected_len = num_hists + num_models if key in ["colors", "alphas"] else num_hists
 
         if isinstance(final_value, list):
@@ -207,30 +174,33 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
     return used, final_value
 
 
-def refresh_config(hist_list: List[HistogramType]) -> None:
-    """Updates config_parameters with defaults and applicability based on histograms."""
-    # Need a copy of keys because dict size might change if new keys are added by read_config_defaults
-    keys_to_process = list(config_parameters.keys())
-    for key in keys_to_process:
-        current_value, _, current_hide = config_parameters[key]
-        used, new_value = read_config_defaults(hist_list, key, current_value)
-        set_config(key, new_value, used, current_hide) # Update value and used status
+def refresh_config(hist_list: List[HistogramType], config: PlotConfig) -> None:
+    """Resolve histogram-dependent defaults for a plotting configuration."""
+    for key in list(config.keys()):
+        parameter = config.get_parameter(key)
+        if parameter is None:
+            continue
+        used, new_value = read_config_defaults(hist_list, key, parameter.value, config)
+        config.set(key, new_value, used=used, hidden=parameter.hidden)
 
 
-def request_additional_config(hist_list: List[HistogramType]):
+def request_additional_config(hist_list: List[HistogramType], config: PlotConfig):
     """Interactive prompt to modify configuration parameters."""
     hist = hist_list[0]
     show_hidden = False
 
     while True:
-        refresh_config(hist_list) # Ensure defaults and 'used' status are up-to-date
+        refresh_config(hist_list, config) # Ensure defaults and 'used' status are up-to-date
 
         options: Dict[int, Tuple[str, Tuple[type, Optional[type]]]] = {}
-        print(f"\n--- Configure Plot: {green}{get_config('title', hist.title)}{reset} ---")
+        print(f"\n--- Configure Plot: {green}{config.get('title', hist.title)}{reset} ---")
         i = 0
-        sorted_keys = sorted(config_parameters.keys()) # Display alphabetically
+        sorted_keys = sorted(config.keys()) # Display alphabetically
         for key in sorted_keys:
-            value, used, hide = config_parameters[key]
+            parameter = config.get_parameter(key)
+            if parameter is None:
+                continue
+            value, used, hide = parameter.value, parameter.used, parameter.hidden
             # Skip if it's hidden and we're not showing hidden, or if it's explicitly marked as not used
             if (hide and not show_hidden) or not used:
                 continue
@@ -255,7 +225,7 @@ def request_additional_config(hist_list: List[HistogramType]):
         if len(options) == 0:
             print(f"\n{red}WARNING: No configuration options available to display.{reset}")
             print(f"Histogram type: {hist.classname}")
-            print(f"Active options: {', '.join([key for key, (_, used, hide) in config_parameters.items() if used])}")
+            print(f"Active options: {', '.join([key for key, parameter in config.items() if parameter.used])}")
         
         input_indices = [str(j+1) for j in range(len(options))]
         answer = custom_input("Choose command or index: ", keys=["r", "h", "e", "q"] + input_indices)
@@ -265,9 +235,8 @@ def request_additional_config(hist_list: List[HistogramType]):
         elif answer == "r":
             print("\nResetting parameters to defaults...")
             # Reset by setting all values to None, then refresh
-            for key in config_parameters.keys():
-                set_config(key, None)
-            refresh_config(hist_list) # Recalculate defaults
+            config.reset()
+            refresh_config(hist_list, config) # Recalculate defaults
             continue
         elif answer == "h":
             print("\n--- Histogram Info ---")
@@ -290,12 +259,12 @@ def request_additional_config(hist_list: List[HistogramType]):
             idx = int(answer) - 1  # Subtract 1 to convert from 1-based to 0-based
             if idx not in options: raise ValueError("Index out of range")
             option_key, option_type_info = options[idx]
-            current_value = get_config(option_key)
+            current_value = config.get(option_key)
 
             # Toggle booleans directly
             if option_type_info[0] == bool:
-                set_config(option_key, not current_value)
-                print(f"Set {option_key} to {get_config(option_key)}")
+                config.set(option_key, not current_value)
+                print(f"Set {option_key} to {config.get(option_key)}")
                 continue
 
             # Prompt for new value
@@ -306,7 +275,7 @@ def request_additional_config(hist_list: List[HistogramType]):
 
             # Parse the input based on expected type
             new_value = parse_input_value(value_in, option_key, option_type_info)
-            set_config(option_key, new_value)
+            config.set(option_key, new_value)
 
         except ValueError as e:
             print(f"{red}Invalid input: {e}{reset}", file=sys.stderr)
@@ -368,7 +337,13 @@ def display_rootpaths(classname: str) -> str:
     return formatted
 
 
-def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[str]:
+def find_histograms(
+    root_file,
+    path_keywords: List[str],
+    stack: bool,
+    *,
+    quiet: bool = False,
+) -> List[str]:
     """Finds histograms in a ROOT file matching keywords, handles user selection."""
     try:
         # Use classnames() for efficiency if available, otherwise keys(filter_classname=...)
@@ -390,7 +365,8 @@ def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[st
 
 
     if not found:
-        print(f"\n{red}ERROR: No histograms found matching keywords: {' '.join(path_keywords)}{reset}", file=sys.stderr)
+        if not quiet:
+            print(f"\n{red}ERROR: No histograms found matching keywords: {' '.join(path_keywords)}{reset}", file=sys.stderr)
         return [] # Return empty list, let caller handle exit
 
     # Sort found keys for consistent ordering
@@ -404,6 +380,20 @@ def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[st
         # print("  ...")
         return [] # Return empty list
 
+    return select_histogram_keys(found, all_items, stack=stack)
+
+
+def select_histogram_keys(
+    found: List[str],
+    labels: Dict[str, str],
+    *,
+    stack: bool,
+    display_paths: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """Select one or more matches using the standard terminal UI."""
+    if not found:
+        return []
+
     if stack:
         if len(found) == 1:
             print(f"{red}Warning: Only one histogram found, cannot stack. Selecting it.{reset}", file=sys.stderr)
@@ -411,7 +401,12 @@ def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[st
 
         print("\nFound histograms for stacking:")
         for i, key in enumerate(found):
-            print(f"  ({i}) {all_items[key]}: {display_rootpaths(key)}")
+            display_path = (display_paths or {}).get(key)
+            if display_path is not None:
+                display_path = display_rootpaths(display_path)
+            else:
+                display_path = display_rootpaths(key)
+            print(f"  ({i}) {labels[key]}: {display_path}")
 
         while True:
             indices_str = custom_input(f"\nEnter indices to stack (e.g., '0 1 3'), or ENTER for all: ")
@@ -430,8 +425,8 @@ def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[st
                      # continue
                 selected = [found[idx] for idx in indices]
                 # Check type compatibility for stacking (optional but recommended)
-                first_type = all_items[selected[0]]
-                if not all(all_items[key] == first_type for key in selected):
+                first_type = labels[selected[0]]
+                if not all(labels[key] == first_type for key in selected):
                      print(f"{red}Warning: Selected histograms have different types. Stacking might fail or produce unexpected results.{reset}", file=sys.stderr)
                 break
             except ValueError as e:
@@ -445,7 +440,12 @@ def find_histograms(root_file, path_keywords: List[str], stack: bool) -> List[st
 
         print("\nFound multiple histograms:")
         for i, key in enumerate(found):
-            print(f"  ({i}) {all_items[key]}: {display_rootpaths(key)}")
+            display_path = (display_paths or {}).get(key)
+            if display_path is not None:
+                display_path = display_rootpaths(display_path)
+            else:
+                display_path = display_rootpaths(key)
+            print(f"  ({i}) {labels[key]}: {display_path}")
 
         input_indices = [str(i) for i in range(len(found))]
         while True:
@@ -792,27 +792,20 @@ def _sanitize_path_for_cache_component(path_str: str) -> str:
         return "root_anapath" # Default for root-like or empty paths
     return sanitized
 
-def _get_cache_file_path() -> str:
-    """
-    Determines the full path to the cache.json file based on the global anapath.
-    The cache will be stored in a subdirectory of COMMON_CACHE_BASE_DIR,
-    named after a sanitized version of the current anapath.
-    """
-    global anapath # Uses the global anapath set by set_global_anapath
-    
+def _get_cache_file_path(anapath: str) -> str:
+    """Return the cache file associated with an analysis base path."""
     sanitized_anapath_component = _sanitize_path_for_cache_component(anapath)
-    
-    anapath_specific_cache_dir = os.path.join(COMMON_CACHE_BASE_DIR, sanitized_anapath_component)
-    os.makedirs(anapath_specific_cache_dir, exist_ok=True) # Ensure directory exists
-    
-    return os.path.join(anapath_specific_cache_dir, CACHE_FILE)
+    cache_dir = os.path.join(COMMON_CACHE_BASE_DIR, sanitized_anapath_component)
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, CACHE_FILE)
 
 
-def save_cache(matching_keys: List[str], root_path: str, output_path: str, title: str, edit_index: Optional[int] = None) -> None:
+def save_cache(matching_keys: List[str], root_path: str, output_path: str, title: str, config: PlotConfig, anapath: str, edit_index: Optional[int] = None) -> None:
     """Saves the current configuration and context to a JSON cache file."""
     # Make config serializable (convert numpy arrays if any)
     serializable_config = {}
-    for key, (value, used, hide) in config_parameters.items():
+    for key, parameter in config.items():
+        value, used, hide = parameter.value, parameter.used, parameter.hidden
         if isinstance(value, np.ndarray):
             serializable_config[key] = (value.tolist(), used, hide)
         else:
@@ -827,7 +820,7 @@ def save_cache(matching_keys: List[str], root_path: str, output_path: str, title
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S") # ISO-like format
     }
 
-    cache_path: str = _get_cache_file_path()
+    cache_path: str = _get_cache_file_path(anapath)
     print(f"Saving cache entry to: {cache_path}")
     try:
         with open(cache_path, "r") as f:
@@ -848,9 +841,9 @@ def save_cache(matching_keys: List[str], root_path: str, output_path: str, title
         print(f"{red}Error writing cache file {cache_path}: {e}{reset}", file=sys.stderr)
 
 
-def load_cache(entry_index: int = -1) -> Optional[Tuple[Dict[str, Any], List[str], str, str, str]]:
+def load_cache(anapath: str, entry_index: int = -1) -> Optional[Tuple[Dict[str, Any], List[str], str, str, str]]:
     """Loads configuration and context from the JSON cache file."""
-    cache_path: str = _get_cache_file_path()
+    cache_path: str = _get_cache_file_path(anapath)
     try:
         with open(cache_path, "r") as f:
             cache_entries = json.load(f)
@@ -889,11 +882,6 @@ def load_cache(entry_index: int = -1) -> Optional[Tuple[Dict[str, Any], List[str
     selected = cache_entries[entry_index]
     title = selected.get('title', 'Untitled')
     print(f"Loading cache entry {entry_index}: {green}{title}{reset}")
-
-    # Load config back into global state
-    global config_parameters
-    config_parameters.clear()
-    config_parameters.update(selected.get("config", {}))
 
     # Return loaded data
     return (
@@ -972,3 +960,5 @@ def display_property(key: str, value: Optional[Any] = None) -> str:
         output += f"{blue}{key}"
     
     return f"{output}{reset}"
+
+

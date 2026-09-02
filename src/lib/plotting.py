@@ -5,19 +5,22 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 import scipy.stats # For chi2 probability in model stats box
+import uproot
 from matplotlib.collections import PolyCollection
 from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, VPacker, HPacker
 from typing import List, Dict, Any, Optional, Tuple
 
 # Import from other library modules
 from .constants import HistogramType
-from .utils import get_config, get_color, set_equal_nice_ticks, getMember
+from .config import PlotConfig
+from .utils import get_color, set_equal_nice_ticks, getMember
 from .models import model_functions, quick_plot_model
 
 # --- Statistics Box Creation ---
 
-def create_stats_box(ax: plt.Axes, stats: List[Tuple[str, str]], title: Optional[str] = None,
-                     color: str = "black", size: int = 10, offset: float = 0.0) -> None:
+def create_stats_box(ax: plt.Axes, stats: List[Tuple[str, str]], config: PlotConfig,
+                     title: Optional[str] = None, color: str = "black",
+                     size: int = 10, offset: float = 0.0) -> None:
     """Creates an anchored stats box with aligned columns."""
     if not stats: return # Don't create empty boxes
 
@@ -31,7 +34,7 @@ def create_stats_box(ax: plt.Axes, stats: List[Tuple[str, str]], title: Optional
 
     if title is not None:
         # Use the actual color value, not the name
-        actual_color = get_color(color, get_config("palette", "color1")) # Provide default palette
+        actual_color = get_color(color, config.get("palette", "color1")) # Provide default palette
         title_area = TextArea(title, textprops={"size": size, "color": actual_color, "weight": "bold"})
         vbox = VPacker(children=[title_area, hbox], align="left", pad=0, sep=5)
     else:
@@ -48,7 +51,7 @@ def create_stats_box(ax: plt.Axes, stats: List[Tuple[str, str]], title: Optional
     ax.add_artist(anchored_box)
 
 
-def create_stats(ax: plt.Axes, hist: HistogramType, i: int = 0,
+def create_stats(ax: plt.Axes, hist: HistogramType, config: PlotConfig, i: int = 0,
                  name: Optional[str] = None, limits: Optional[List[float]] = None,
                  color: str = "black") -> None:
     """Computes and creates a statistics box for TH1 or TH2 histograms."""
@@ -57,7 +60,7 @@ def create_stats(ax: plt.Axes, hist: HistogramType, i: int = 0,
         result = hist.to_numpy()
         textsize = plt.rcParams['font.size'] * 0.9 # Slightly smaller for stats
 
-        if isinstance(hist, (uproot.behaviors.TH1.TH1, uproot.behaviors.TH1.TH1F, uproot.behaviors.TH1.TH1D)):
+        if isinstance(hist, uproot.behaviors.TH1.TH1):
             values, edges = result
             midpoints = (edges[:-1] + edges[1:]) / 2
             mask = np.ones_like(midpoints, dtype=bool)
@@ -76,7 +79,7 @@ def create_stats(ax: plt.Axes, hist: HistogramType, i: int = 0,
                           ("Mean", f"{mean:.3g}"), # Use general format
                           ("Std Dev", f"{std:.3g}")]
 
-        elif isinstance(hist, (uproot.behaviors.TH2.TH2, uproot.behaviors.TH2.TH2F, uproot.behaviors.TH2.TH2D)):
+        elif isinstance(hist, uproot.behaviors.TH2.TH2):
             data, x_edges, y_edges = result
             mid_x = (x_edges[:-1] + x_edges[1:]) / 2.0
             mid_y = (y_edges[:-1] + y_edges[1:]) / 2.0
@@ -111,13 +114,13 @@ def create_stats(ax: plt.Axes, hist: HistogramType, i: int = 0,
         if stats_list:
             # Calculate vertical offset based on number of previous boxes and text size
             vertical_offset = i * (len(stats_list) + (1 if name else 0) + 1.5) * (textsize / 10.0) * 0.035 # Empirical scaling
-            create_stats_box(ax, stats_list, title=name, color=color, size=int(textsize), offset=vertical_offset)
+            create_stats_box(ax, stats_list, config, title=name, color=color, size=int(textsize), offset=vertical_offset)
 
     except Exception as e:
         print(f"Warning: Could not compute statistics for {getattr(hist, 'title', 'histogram')}: {e}", file=sys.stderr)
 
 
-def create_model_stats_box(ax: plt.Axes, model_name: str, model_info: Dict[str, Any], offset: float = 0.0, color: str = 'black') -> None:
+def create_model_stats_box(ax: plt.Axes, model_name: str, model_info: Dict[str, Any], config: PlotConfig, offset: float = 0.0, color: str = 'black') -> None:
     """Creates a statistics box for model fit parameters."""
     textsize = plt.rcParams['font.size'] * 0.85 # Slightly smaller
 
@@ -148,7 +151,7 @@ def create_model_stats_box(ax: plt.Axes, model_name: str, model_info: Dict[str, 
     if not stats: return
 
     # Use the actual color value
-    actual_color = get_color(color, get_config("palette", "color1"))
+    actual_color = get_color(color, config.get("palette", "color1"))
 
     prop_boxes = [TextArea(prop, textprops={"size": textsize, "family": "monospace"}) for prop, _ in stats]
     val_boxes = [TextArea(val, textprops={"size": textsize, "family": "monospace"}) for _, val in stats]
@@ -225,7 +228,7 @@ def add_TH1(ax: plt.Axes, index: int, hist: HistogramType, color: str, alpha: fl
             print("Warning: No labels found for categorical histogram", file=sys.stderr)
     else:
         # Step plot or error bar plot for numerical data
-        show_errors = get_config("errors", False)
+        show_errors = config.get("errors", False)
         if show_errors and has_errors:
             ax.errorbar(midpoints, values, yerr=errors, fmt='.', color=color, # Use '.' for marker
                        markersize=thickness * 2, ecolor=color, elinewidth=thickness/2, capsize=thickness, # Scale sizes with thickness
@@ -238,25 +241,25 @@ def add_TH1(ax: plt.Axes, index: int, hist: HistogramType, color: str, alpha: fl
             #         histtype="step", label=hist.title, linewidth=thickness)
 
 
-def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
+def process_TH1(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig) -> None:
     """Processes and plots a list of TH1 histograms."""
-    limits_config = get_config("limits", None) # Can be [[xmin, xmax], [ymin, ymax]] or just [[xmin, xmax]]
+    limits_config = config.get("limits", None) # Can be [[xmin, xmax], [ymin, ymax]] or just [[xmin, xmax]]
     limits = limits_config[0] if limits_config and len(limits_config) > 0 else None
     y_limits = limits_config[1] if limits_config and len(limits_config) > 1 else None
 
-    colors = get_config("colors", [])
-    color_palette = get_config("palette", "color1") # Default palette
-    alphas = get_config("alphas", [])
-    log_x = get_config("x-log", False)
-    log_y = get_config("y-log", False)
-    thickness = get_config("thickness", 1.5) # Default thickness
-    cutoff = get_config("cutoff", False)
-    show_stats = get_config("stats", False)
-    show_legend = get_config("legend", False)
-    names = get_config("names", [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)])
-    models = get_config("models", [])
-    model_params_config = get_config("model-params", {})
-    show_model_stats = get_config("model-stats", True)
+    colors = config.get("colors", [])
+    color_palette = config.get("palette", "color1") # Default palette
+    alphas = config.get("alphas", [])
+    log_x = config.get("x-log", False)
+    log_y = config.get("y-log", False)
+    thickness = config.get("thickness", 1.5) # Default thickness
+    cutoff = config.get("cutoff", False)
+    show_stats = config.get("stats", False)
+    show_legend = config.get("legend", False)
+    names = config.get("names", [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)])
+    models = config.get("models", [])
+    model_params_config = config.get("model-params", {})
+    show_model_stats = config.get("model-stats", True)
 
     # Ensure enough colors and alphas, cycle if necessary
     num_hists = len(hist_list)
@@ -281,7 +284,7 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
     plotted_items_count = 0
     for i, hist in enumerate(hist_list):
         actual_color = get_color(colors[i], color_palette)
-        add_TH1(ax, i, hist, actual_color, alphas[i], [limits] if limits else None, is_ratio, num_hists, thickness, cutoff)
+        add_TH1(ax, i, hist, actual_color, alphas[i], config, [limits] if limits else None, is_ratio, num_hists, thickness, cutoff)
         plotted_items_count += 1
 
     # Plot models
@@ -289,8 +292,8 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
     model_stat_boxes_count = 0
     if models and not is_ratio:
         num_models = len(models)
-        model_colors = get_config("model-colors", colors[num_hists:]) # Use extra colors if provided
-        model_alphas = get_config("model-alphas", alphas[num_hists:])
+        model_colors = config.get("model-colors", colors[num_hists:]) # Use extra colors if provided
+        model_alphas = config.get("model-alphas", alphas[num_hists:])
 
         if len(model_colors) < num_models:
              # Cycle through histogram colors or default if none provided
@@ -343,21 +346,21 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
                     model_stats_data = params["stats"]
                     # Offset model stat boxes from the bottom
                     model_offset = model_stat_boxes_count * 0.25 # Adjust spacing as needed
-                    create_model_stats_box(ax, model_name, model_stats_data, offset=model_offset, color=model_colors[i])
+                    create_model_stats_box(ax, model_name, model_stats_data, config, offset=model_offset, color=model_colors[i])
                     model_stat_boxes_count += 1
 
 
     # Axis labels and limits
     if not is_ratio:
-        ax.set_xlabel(get_config("x-label", "X-axis"))
+        ax.set_xlabel(config.get("x-label", "X-axis"))
         if limits and limits[0] is not None and limits[1] is not None and not cutoff:
              ax.set_xlim(limits)
         ax.set_xscale("log" if log_x else "linear")
     else:
         # For ratio plots, x-label might be less meaningful or needs specific handling
-        ax.set_xlabel(get_config("x-label", "")) # Often empty for categorical
+        ax.set_xlabel(config.get("x-label", "")) # Often empty for categorical
 
-    ax.set_ylabel(get_config("y-label", "Entries"))
+    ax.set_ylabel(config.get("y-label", "Entries"))
     if y_limits and y_limits[0] is not None and y_limits[1] is not None:
         ax.set_ylim(y_limits)
     ax.set_yscale("log" if log_y else "linear")
@@ -368,7 +371,7 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
         for i, hist in enumerate(hist_list):
             # Pass limits[0] if it exists for TH1 stats calculation range
             stat_limits = [limits] if limits else None
-            create_stats(ax, hist, i, name=names[i] if num_hists > 1 else None, limits=stat_limits, color=colors[i])
+            create_stats(ax, hist, config, i, name=names[i] if num_hists > 1 else None, limits=stat_limits, color=colors[i])
             hist_stat_boxes_count += 1
 
 
@@ -387,7 +390,7 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
         ax.legend(by_label.values(), by_label.keys(), loc=loc)
 
 
-def process_TH2(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
+def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig) -> None:
     """Processes and plots a list of TH2 histograms (currently only supports one)."""
     if len(hist_list) > 1:
         print("ERROR: Stacking of TH2 histograms not yet implemented.", file=sys.stderr)
@@ -405,16 +408,16 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
         return
 
     # Configuration
-    color_map_name = get_config("colors", ["viridis_red"])[0] # Expect list, take first
+    color_map_name = config.get("colors", ["viridis_red"])[0] # Expect list, take first
     cmap = plt.get_cmap(color_map_name)
     cmap.set_bad(alpha=0) # Make empty bins transparent
     cmap.set_under(alpha=0) # Make underflow transparent (if vmin is set > 0)
 
-    log_z = get_config("z-log", False)
-    show_stats = get_config("stats", False)
-    show_colorbar = get_config("legend", True) # Use legend flag for colorbar
-    rasterized = get_config("raster", True)
-    limits_config = get_config("limits", None) # [[xmin, xmax], [ymin, ymax]]
+    log_z = config.get("z-log", False)
+    show_stats = config.get("stats", False)
+    show_colorbar = config.get("legend", True) # Use legend flag for colorbar
+    rasterized = config.get("raster", True)
+    limits_config = config.get("limits", None) # [[xmin, xmax], [ymin, ymax]]
 
     limit_x = limits_config[0] if limits_config and len(limits_config) > 0 else (x_edges[0], x_edges[-1])
     limit_y = limits_config[1] if limits_config and len(limits_config) > 1 else (y_edges[0], y_edges[-1])
@@ -488,12 +491,12 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
     ax.set_xlim(limit_x)
     ax.set_ylim(limit_y)
     
-    ax.set_xlabel(rf"{get_config('x-label')}")
-    ax.set_ylabel(rf"{get_config('y-label')}")
+    ax.set_xlabel(rf"{config.get('x-label')}")
+    ax.set_ylabel(rf"{config.get('y-label')}")
 
     # Add statistics box
     if show_stats:
-        create_stats(ax, hist) # Pass full limits config #, limits=limits_config
+        create_stats(ax, hist, config)
 
     # Add colorbar
     if show_colorbar:
@@ -523,7 +526,7 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
             cbar.set_ticklabels([f"{int(t)}" if t >= 1 else f"{t:.1g}" for t in tick_locations])
     
 
-def add_flat_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, raster: bool, norm) -> None:
+def add_flat_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, raster: bool, norm, config: PlotConfig) -> None:
     """Adds a TH3 histogram as flat 2D slices to a 3D axis."""
     try:
         data, x_edges, y_edges, z_edges = hist.to_numpy()
@@ -571,7 +574,7 @@ def add_flat_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, raster: 
         ax.add_collection3d(poly, zs=z_position, zdir='z')
 
 
-def add_3d_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, norm) -> None:
+def add_3d_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, norm, config: PlotConfig) -> None:
     """Adds a TH3 histogram as 3D bars to a 3D axis."""
     try:
         data, x_edges, y_edges, z_edges = hist.to_numpy()
@@ -601,7 +604,7 @@ def add_3d_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, norm) -> N
                              color=final_color, shade=alpha > 0.8) # Shade if mostly opaque
 
 
-def process_TH3(ax: plt.Axes, hist_list: List[HistogramType]) -> plt.Artist:
+def process_TH3(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig) -> plt.Artist:
     """Processes and plots a list of TH3 histograms (currently only supports one)."""
     if len(hist_list) > 1:
         print("ERROR: Stacking of TH3 histograms not yet implemented.", file=sys.stderr)
@@ -613,17 +616,17 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType]) -> plt.Artist:
     hist = hist_list[0]
 
     # Configuration
-    angles = get_config("angles", [30, -60]) # Default view angles (elev, azim)
-    color_map_name = get_config("colors", ["viridis_red"])[0]
+    angles = config.get("angles", [30, -60]) # Default view angles (elev, azim)
+    color_map_name = config.get("colors", ["viridis_red"])[0]
     cmap = plt.get_cmap(color_map_name)
     cmap.set_bad(alpha=0)
-    alpha = get_config("alphas", [0.7])[0] # Default alpha for 3D
-    is_flat = get_config("flat", False)
-    raster = get_config("raster", True)
-    show_colorbar = get_config("legend", True)
-    show_grid = get_config("grid", True)
-    limits_config = get_config("limits", None) # [[xmin, xmax], [ymin, ymax], [zmin, zmax]]
-    log_z = get_config("z-log", False) # Use z-log for color mapping
+    alpha = config.get("alphas", [0.7])[0] # Default alpha for 3D
+    is_flat = config.get("flat", False)
+    raster = config.get("raster", True)
+    show_colorbar = config.get("legend", True)
+    show_grid = config.get("grid", True)
+    limits_config = config.get("limits", None) # [[xmin, xmax], [ymin, ymax], [zmin, zmax]]
+    log_z = config.get("z-log", False) # Use z-log for color mapping
 
     ax.view_init(angles[0], angles[1])
 
@@ -646,9 +649,9 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType]) -> plt.Artist:
 
     # Plotting
     if is_flat:
-        add_flat_TH3(ax, hist, cmap, alpha, raster, norm)
+        add_flat_TH3(ax, hist, cmap, alpha, raster, norm, config)
     else:
-        add_3d_TH3(ax, hist, cmap, alpha, norm)
+        add_3d_TH3(ax, hist, cmap, alpha, norm, config)
 
     # Set limits
     if limits_config:
@@ -661,9 +664,9 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType]) -> plt.Artist:
         ax.set_zlim(z_edges[0], z_edges[-1])
 
     # Labels and grid
-    ax.set_xlabel(get_config("x-label", "X"))
-    ax.set_ylabel(get_config("y-label", "Y"))
-    zlabel_text = get_config("z-label", "Z")
+    ax.set_xlabel(config.get("x-label", "X"))
+    ax.set_ylabel(config.get("y-label", "Y"))
+    zlabel_text = config.get("z-label", "Z")
     zlabel = ax.set_zlabel(zlabel_text) # Store the Z-label artist
 
     if show_grid:
@@ -687,23 +690,23 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType]) -> plt.Artist:
     return zlabel # Return the Z-label artist for potential inclusion in bbox_extra_artists
 
 
-def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
+def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig) -> None:
     """Processes and plots a list of TGraph or TF1 objects."""
-    limits_config = get_config("limits", None) # [[xmin, xmax], [ymin, ymax]]
+    limits_config = config.get("limits", None) # [[xmin, xmax], [ymin, ymax]]
     x_limits = limits_config[0] if limits_config and len(limits_config) > 0 else None
     y_limits = limits_config[1] if limits_config and len(limits_config) > 1 else None
 
-    names = get_config("names", [getattr(h, 'title', f'Graph {i}') for i, h in enumerate(hist_list)])
-    colors = get_config("colors", [])
-    color_palette = get_config("palette", "color1")
-    alphas = get_config("alphas", [])
-    log_x = get_config("x-log", False)
-    log_y = get_config("y-log", False)
-    show_legend = get_config("legend", False)
+    names = config.get("names", [getattr(h, 'title', f'Graph {i}') for i, h in enumerate(hist_list)])
+    colors = config.get("colors", [])
+    color_palette = config.get("palette", "color1")
+    alphas = config.get("alphas", [])
+    log_x = config.get("x-log", False)
+    log_y = config.get("y-log", False)
+    show_legend = config.get("legend", False)
     # Add thickness? Errors? Markers?
-    marker_style = get_config("marker", None) # e.g., 'o', '.', '+'
-    line_style = get_config("linestyle", '-') # e.g., '-', '--', ':'
-    line_width = get_config("thickness", 1.5)
+    marker_style = config.get("marker", None) # e.g., 'o', '.', '+'
+    line_style = config.get("linestyle", '-') # e.g., '-', '--', ':'
+    line_width = config.get("thickness", 1.5)
 
     num_graphs = len(hist_list)
     if len(colors) < num_graphs:
@@ -745,7 +748,7 @@ def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
 
             if x is not None and y is not None:
                  # Plot with or without errors
-                 if yerr is not None and get_config("errors", False): # Check config for errors
+                 if yerr is not None and config.get("errors", False): # Check config for errors
                      ax.errorbar(x, y, yerr=yerr, xerr=xerr, fmt=marker_style or '.', # Default marker '.' if errors shown
                                  markersize=(line_width*2 if marker_style else 0), # Only show marker if specified
                                  linestyle='none', # No line connecting error points by default
@@ -767,12 +770,12 @@ def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
     # Set limits and scales
     if x_limits and x_limits[0] is not None and x_limits[1] is not None: ax.set_xlim(x_limits)
     if y_limits and y_limits[0] is not None and y_limits[1] is not None: ax.set_ylim(y_limits)
-    ax.set_xlabel(get_config("x-label", "X"))
-    ax.set_ylabel(get_config("y-label", "Y"))
+    ax.set_xlabel(config.get("x-label", "X"))
+    ax.set_ylabel(config.get("y-label", "Y"))
     ax.set_xscale("log" if log_x else "linear")
     ax.set_yscale("log" if log_y else "linear")
 
-    if get_config("grid", False): # Add grid option
+    if config.get("grid", False): # Add grid option
         ax.grid(True, linestyle='--', alpha=0.6)
 
     if show_legend and plotted_items_count > 0:
@@ -783,18 +786,18 @@ def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType]) -> None:
 
 # --- Main Plotting Orchestration ---
 
-def process_histograms(hist_list: List[HistogramType]) -> Tuple[Optional[plt.Figure], Optional[str], List[plt.Artist]]:
+def process_histograms(hist_list: List[HistogramType], config: PlotConfig) -> Tuple[Optional[plt.Figure], Optional[str], List[plt.Artist]]:
     """Determines histogram type and calls the appropriate plotting function."""
     if not hist_list:
         print("ERROR: No histograms provided to process.", file=sys.stderr)
         return None, None, []
 
     first_hist = hist_list[0]
-    title = get_config("title", getattr(first_hist, 'title', "Histogram")) # Use getattr for safety
+    title = config.get("title", getattr(first_hist, 'title', "Histogram")) # Use getattr for safety
     extra_artists = [] # For artists like Z-label that need to be included in bbox_inches='tight'
 
     # Apply general plot styling from config
-    textsize = get_config("textsize", 12.0) # Default text size
+    textsize = config.get("textsize", 12.0) # Default text size
     plt.rcParams.update({
         'font.size': textsize,
         'axes.titlesize': textsize * 1.1,
@@ -806,23 +809,23 @@ def process_histograms(hist_list: List[HistogramType]) -> Tuple[Optional[plt.Fig
     })
 
     # Create figure
-    fig = plt.figure(figsize=get_config("figsize", (8, 6))) # Configurable figure size
+    fig = plt.figure(figsize=config.get("figsize", (8, 6))) # Configurable figure size
 
     # Determine plot type and call processor
     ax = None
-    if isinstance(first_hist, (uproot.behaviors.TH1.TH1, uproot.behaviors.TH1.TH1F, uproot.behaviors.TH1.TH1D)):
+    if isinstance(first_hist, uproot.behaviors.TH1.TH1):
         ax = fig.add_subplot(111)
-        process_TH1(ax, hist_list)
-    elif isinstance(first_hist, (uproot.behaviors.TH2.TH2, uproot.behaviors.TH2.TH2F, uproot.behaviors.TH2.TH2D)):
+        process_TH1(ax, hist_list, config)
+    elif isinstance(first_hist, uproot.behaviors.TH2.TH2):
         ax = fig.add_subplot(111)
-        process_TH2(ax, hist_list)
-    elif isinstance(first_hist, (uproot.behaviors.TH3.TH3, uproot.behaviors.TH3.TH3F, uproot.behaviors.TH3.TH3D)):
+        process_TH2(ax, hist_list, config)
+    elif isinstance(first_hist, uproot.behaviors.TH3.TH3):
         ax = fig.add_subplot(111, projection='3d')
-        zlabel_artist = process_TH3(ax, hist_list)
+        zlabel_artist = process_TH3(ax, hist_list, config)
         if zlabel_artist: extra_artists.append(zlabel_artist)
     elif isinstance(first_hist, (uproot.behaviors.TGraph.TGraph, uproot.behaviors.TGraph.TGraphErrors, uproot.behaviors.TF1.TF1)):
         ax = fig.add_subplot(111)
-        process_TGraph(ax, hist_list)
+        process_TGraph(ax, hist_list, config)
     else:
         print(f"ERROR: Unsupported histogram type: {first_hist.classname}", file=sys.stderr)
         plt.close(fig) # Close the empty figure
