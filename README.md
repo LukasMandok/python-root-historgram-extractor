@@ -1,5 +1,104 @@
 # ROOT Histogram Extractor
 
+## Quick Start
+
+Install the library and all dependencies from the project directory with
+`pip`. A virtual environment keeps the installation separate from the rest
+of your Python installation.
+
+### Linux / macOS
+
+```bash
+cd python-root-historgram-extractor
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+```
+
+### Windows PowerShell
+
+```powershell
+cd python-root-historgram-extractor
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install .
+```
+
+After installation, the command line tool is available as:
+
+```bash
+root-histogram-extractor --help
+```
+
+To update the installation after changing or downloading a newer version of
+the project, activate the same virtual environment and run:
+
+```bash
+python -m pip install --upgrade .
+```
+
+To remove the library from that environment:
+
+```bash
+python -m pip uninstall python-analysis-project
+```
+
+The project metadata in `pyproject.toml` tells `pip` which dependencies to
+install. No separate `requirements.txt` command is needed for a normal
+installation.
+
+### Installation with `curl` without a repository checkout
+
+This downloads a temporary source archive, installs the package and its
+dependencies into a virtual environment, and removes the temporary files
+afterwards.
+
+#### Linux / macOS
+
+```bash
+REPO_URL="https://github.com/LukasMandok/python-root-historgram-extractor"
+TMP_DIR="$(mktemp -d)"
+curl -fsSL "$REPO_URL/archive/refs/heads/main.tar.gz" | tar -xz -C "$TMP_DIR"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install "$TMP_DIR"/*
+rm -rf "$TMP_DIR"
+```
+
+The same commands can be saved as `install.sh`. Then run:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+#### Windows PowerShell
+
+```powershell
+$RepoUrl = "https://github.com/LukasMandok/python-root-historgram-extractor"
+$TempZip = Join-Path $env:TEMP "root-histogram-extractor.zip"
+$TempDir = Join-Path $env:TEMP "root-histogram-extractor"
+curl.exe -fsSL "$RepoUrl/archive/refs/heads/main.zip" -o $TempZip
+Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install (Get-ChildItem $TempDir -Directory | Select-Object -First 1).FullName
+Remove-Item $TempZip -Force
+Remove-Item $TempDir -Recurse -Force
+```
+
+For a private repository, the archive URL must be accessed with suitable
+authentication. Once the repository is public, no Git installation is
+required; `curl`, Python and `pip` are sufficient.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
 A small Python tool for extracting ROOT histograms, plotting them with Matplotlib, and optionally saving the result as optimized SVG files.
 
 The project is designed around two use cases:
