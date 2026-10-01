@@ -41,11 +41,14 @@ class PlotConfig:
         "title": (None, True, False),
         "x-label": (None, True, False),
         "y-label": (None, True, False),
+        "x-multiplier": (1.0, True, False),
+        "y-multiplier": (1.0, True, False),
         "z-label": (None, False, False),
         "x-log": (False, True, True),
         "y-log": (False, True, True),
         "z-log": (False, False, True),
         "limits": (None, True, False),
+        "bin_width": (None, True, False),
         "legend": (None, True, False),
         "stats": (False, True, False),
         "grid": (None, True, True),
@@ -60,11 +63,13 @@ class PlotConfig:
         "flat": (False, False, True),
         "raster": (None, False, True),
         "errors": (False, False, True),
+        "fits": (False, True, False),
         "models": ([], False, True),
         "model-params": ({}, False, True),
         "model-stats": (True, False, False),
         "figsize": ((8, 6), False, True),
         "textsize": (12.0, False, True),
+        "background": ("white", True, False),
     }
 
     def __init__(

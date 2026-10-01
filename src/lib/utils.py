@@ -13,6 +13,7 @@ from datetime import datetime
 import subprocess
 import re
 import sys
+from difflib import SequenceMatcher
 import argparse
 from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 
@@ -60,6 +61,10 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
                               for i, j in zip(limits, limits_next)]
         default_value = limits
         used = is_th1 or is_th2 or is_th3 or is_tgraph or is_tf1 # Generally used
+
+    elif key == "bin_width":
+        used = is_th1 or is_th2 or is_th3
+        default_value = None
         
     elif key == "x-label":
         default_value = convert_to_latex(getMember(getMember(hist, "fXaxis"), "fTitle", ""))
@@ -103,6 +108,9 @@ def read_config_defaults(hist_list: List[HistogramType], key: str, current_value
         default_value = True
     elif key == "errors": 
         used = is_th1 or is_tgraph
+        default_value = False
+    elif key == "fits":
+        used = is_th1
         default_value = False
     elif key == "colors":
         if is_th1 or is_tgraph or is_tf1:
@@ -213,7 +221,7 @@ def request_additional_config(hist_list: List[HistogramType], config: PlotConfig
             elif isinstance(value, dict) and value:
                  inner_type = type(next(iter(value.values()))) # Type of first value in dict
 
-            options[i] = (key, (outer_type, inner_type))
+            options[i + 1] = (key, (outer_type, inner_type))
             print(f"  ({i+1}) {display_property(key, value)}")
             i += 1
 
@@ -256,7 +264,7 @@ def request_additional_config(hist_list: List[HistogramType], config: PlotConfig
 
         # --- Edit Parameter ---
         try:
-            idx = int(answer) - 1  # Subtract 1 to convert from 1-based to 0-based
+            idx = int(answer)
             if idx not in options: raise ValueError("Index out of range")
             option_key, option_type_info = options[idx]
             current_value = config.get(option_key)
@@ -343,6 +351,7 @@ def find_histograms(
     stack: bool,
     *,
     quiet: bool = False,
+    selection: str = "prompt",
 ) -> List[str]:
     """Finds histograms in a ROOT file matching keywords, handles user selection."""
     try:
@@ -380,7 +389,13 @@ def find_histograms(
         # print("  ...")
         return [] # Return empty list
 
-    return select_histogram_keys(found, all_items, stack=stack)
+    return select_histogram_keys(
+        found,
+        all_items,
+        stack=stack,
+        selection=selection,
+        query="".join(path_keywords),
+    )
 
 
 def select_histogram_keys(
@@ -389,10 +404,27 @@ def select_histogram_keys(
     *,
     stack: bool,
     display_paths: Optional[Dict[str, str]] = None,
+    selection: str = "prompt",
+    query: str = "",
 ) -> List[str]:
     """Select one or more matches using the standard terminal UI."""
     if not found:
         return []
+
+    if selection not in {"prompt", "most_similar"}:
+        raise ValueError("selection must be 'prompt' or 'most_similar'")
+
+    if selection == "most_similar" and not stack and len(found) > 1:
+        normalized_query = query.lower()
+        selected = max(
+            found,
+            key=lambda key: SequenceMatcher(
+                None,
+                normalized_query,
+                key.rsplit("/", 1)[-1].split(";", 1)[0].lower(),
+            ).ratio(),
+        )
+        return [selected]
 
     if stack:
         if len(found) == 1:
@@ -576,9 +608,13 @@ def extract_axis_limits(hist: HistogramType) -> List[Tuple[Optional[float], Opti
 def custom_input(message: Optional[str] = "", keys: Optional[List[str]] = []) -> str:
     """Gets user input with optional key bindings and escape handling."""
     bindings = KeyBindings()
+    numeric_keys = [key for key in keys if key.isdigit()]
+    use_numeric_bindings = not numeric_keys or max(map(len, numeric_keys)) == 1
 
     # Add specific key bindings if provided
     for key in keys:
+        if key.isdigit() and not use_numeric_bindings:
+            continue
         # Use a closure to capture the key value correctly
         def _handler(event, k=key):
             event.app.exit(result=k)

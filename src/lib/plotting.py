@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
+from matplotlib.ticker import FuncFormatter
 import scipy.stats # For chi2 probability in model stats box
 import uproot
 from matplotlib.collections import PolyCollection
@@ -15,6 +16,36 @@ from .constants import HistogramType
 from .config import PlotConfig
 from .utils import get_color, set_equal_nice_ticks, getMember
 from .models import model_functions, quick_plot_model
+
+
+def apply_axis_multipliers(ax: plt.Axes, config: PlotConfig) -> None:
+    """Format displayed tick values using optional axis multipliers."""
+    x_multiplier = config.get("x-multiplier", 1.0)
+    y_multiplier = config.get("y-multiplier", 1.0)
+
+    if x_multiplier != 1.0:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * x_multiplier:g}"))
+    if y_multiplier != 1.0:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * y_multiplier:g}"))
+
+
+def apply_background(fig: plt.Figure, ax: Optional[plt.Axes], config: PlotConfig) -> None:
+    """Apply an opaque color or transparent background to the plot."""
+    background = config.get("background", "white")
+    transparent = background is None or (
+        isinstance(background, str) and background.lower() in {"none", "alpha"}
+    )
+
+    if transparent:
+        fig.patch.set_alpha(0.0)
+        if ax is not None:
+            ax.patch.set_alpha(0.0)
+    else:
+        fig.patch.set_facecolor(background)
+        fig.patch.set_alpha(1.0)
+        if ax is not None:
+            ax.patch.set_facecolor(background)
+            ax.patch.set_alpha(1.0)
 
 # --- Statistics Box Creation ---
 
@@ -34,7 +65,7 @@ def create_stats_box(ax: plt.Axes, stats: List[Tuple[str, str]], config: PlotCon
 
     if title is not None:
         # Use the actual color value, not the name
-        actual_color = get_color(color, config.get("palette", "color1")) # Provide default palette
+        actual_color = get_color(color, config.get("palette", "color0")) # Provide default palette
         title_area = TextArea(title, textprops={"size": size, "color": actual_color, "weight": "bold"})
         vbox = VPacker(children=[title_area, hbox], align="left", pad=0, sep=5)
     else:
@@ -57,7 +88,7 @@ def create_stats(ax: plt.Axes, hist: HistogramType, config: PlotConfig, i: int =
     """Computes and creates a statistics box for TH1 or TH2 histograms."""
     stats_list = []
     try:
-        result = hist.to_numpy()
+        result, _ = histogram_to_numpy(hist, config)
         textsize = plt.rcParams['font.size'] * 0.9 # Slightly smaller for stats
 
         if isinstance(hist, uproot.behaviors.TH1.TH1):
@@ -151,7 +182,7 @@ def create_model_stats_box(ax: plt.Axes, model_name: str, model_info: Dict[str, 
     if not stats: return
 
     # Use the actual color value
-    actual_color = get_color(color, config.get("palette", "color1"))
+    actual_color = get_color(color, config.get("palette", "color0"))
 
     prop_boxes = [TextArea(prop, textprops={"size": textsize, "family": "monospace"}) for prop, _ in stats]
     val_boxes = [TextArea(val, textprops={"size": textsize, "family": "monospace"}) for _, val in stats]
@@ -177,14 +208,92 @@ def create_model_stats_box(ax: plt.Axes, model_name: str, model_info: Dict[str, 
 
 # --- Histogram Processing Functions ---
 
+def _normalise_bin_width(value: Any, dimensions: int) -> List[Optional[float]]:
+    """Normalize scalar or per-axis bin widths and validate their shape."""
+    if value is None:
+        return [None] * dimensions
+
+    if np.isscalar(value):
+        if dimensions != 1:
+            raise ValueError("bin_width must contain one value per axis for TH2/TH3")
+        values = [value]
+    else:
+        values = list(value)
+        if not (dimensions == 1 and len(values) == 1) and len(values) != dimensions:
+            raise ValueError(f"bin_width must contain {dimensions} values for this histogram")
+
+    normalised: List[Optional[float]] = []
+    for width in values:
+        if width is None:
+            normalised.append(None)
+            continue
+        width = float(width)
+        if not np.isfinite(width) or width <= 0:
+            raise ValueError("bin_width values must be positive finite numbers or None")
+        normalised.append(width)
+    return normalised
+
+
+def _rebin_axis(values: np.ndarray, edges: np.ndarray, width: Optional[float], axis: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Combine complete source bins into bins of the requested physical width."""
+    if width is None:
+        return values, edges
+
+    span = float(edges[-1] - edges[0])
+    target_edges = edges[0] + np.arange(int(np.floor(span / width + 1e-10)) + 1) * width
+    if not np.isclose(target_edges[-1], edges[-1], rtol=1e-9, atol=1e-12):
+        target_edges = np.append(target_edges, edges[-1])
+
+    source_indices = []
+    for target_edge in target_edges:
+        matches = np.flatnonzero(np.isclose(edges, target_edge, rtol=1e-9, atol=1e-12))
+        if len(matches) == 0:
+            raise ValueError(f"bin_width={width} does not align with the existing histogram edges")
+        source_indices.append(int(matches[0]))
+
+    rebinned = np.empty(values.shape[:axis] + (len(target_edges) - 1,) + values.shape[axis + 1:], dtype=values.dtype)
+    for target_index, (start, stop) in enumerate(zip(source_indices[:-1], source_indices[1:])):
+        source_slice = [slice(None)] * values.ndim
+        source_slice[axis] = slice(start, stop)
+        target_slice = [slice(None)] * values.ndim
+        target_slice[axis] = target_index
+        rebinned[tuple(target_slice)] = np.sum(values[tuple(source_slice)], axis=axis)
+    return rebinned, np.asarray(target_edges)
+
+
+def histogram_to_numpy(hist: HistogramType, config: PlotConfig) -> Tuple[Tuple[np.ndarray, ...], Optional[np.ndarray]]:
+    """Return histogram arrays after applying optional physical bin widths."""
+    result = hist.to_numpy()
+    values = np.asarray(result[0])
+    widths = _normalise_bin_width(config.get("bin_width"), values.ndim)
+    variances = None
+    if hasattr(hist, "variances"):
+        source_variances = hist.variances()
+        if source_variances is not None:
+            variances = np.asarray(source_variances)
+    if variances is None and hasattr(hist, "errors"):
+        source_errors = hist.errors()
+        if source_errors is not None:
+            variances = np.asarray(source_errors) ** 2
+
+    rebinned_edges = list(result[1:])
+    for axis, width in enumerate(widths):
+        original_edges = np.asarray(rebinned_edges[axis])
+        values, rebinned_edges[axis] = _rebin_axis(values, original_edges, width, axis)
+        if variances is not None:
+            variances, _ = _rebin_axis(variances, original_edges, width, axis)
+
+    errors = None if variances is None else np.sqrt(np.maximum(variances, 0))
+    return (values, *rebinned_edges), errors
+
 def add_TH1(ax: plt.Axes, index: int, hist: HistogramType, color: str, alpha: float,
+           config: PlotConfig,
            limits: Optional[List[Tuple[Optional[float], Optional[float]]]] = None,
            is_ratio: bool = False, count: int = 1, thickness: float = 2.0, cutoff: bool = False) -> None:
     """Adds a single TH1 histogram to the axes."""
     try:
-        values, edges = hist.to_numpy()[:2]
+        (values, edges), errors = histogram_to_numpy(hist, config)
         midpoints = (edges[:-1] + edges[1:]) / 2
-        errors = hist.errors() if hasattr(hist, 'errors') else None
         has_errors = errors is not None and len(errors) == len(values)
 
     except Exception as e:
@@ -248,12 +357,13 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
     y_limits = limits_config[1] if limits_config and len(limits_config) > 1 else None
 
     colors = config.get("colors", [])
-    color_palette = config.get("palette", "color1") # Default palette
+    color_palette = config.get("palette", "color0") # Default palette
     alphas = config.get("alphas", [])
     log_x = config.get("x-log", False)
     log_y = config.get("y-log", False)
     thickness = config.get("thickness", 1.5) # Default thickness
     cutoff = config.get("cutoff", False)
+    show_fits = config.get("fits", False)
     show_stats = config.get("stats", False)
     show_legend = config.get("legend", False)
     names = config.get("names", [getattr(h, 'title', f'Hist {i}') for i, h in enumerate(hist_list)])
@@ -286,6 +396,21 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
         actual_color = get_color(colors[i], color_palette)
         add_TH1(ax, i, hist, actual_color, alphas[i], config, [limits] if limits else None, is_ratio, num_hists, thickness, cutoff)
         plotted_items_count += 1
+
+        if show_fits and not is_ratio:
+            fit_points = getattr(hist, "_embedded_fit_points", None)
+            if fit_points is not None:
+                fit_x, fit_y = fit_points
+                if len(fit_x) and len(fit_y):
+                    fit_title = getattr(hist, "_embedded_fit_title", "embedded fit")
+                    ax.plot(
+                        fit_x,
+                        fit_y,
+                        color="red",
+                        linewidth=thickness,
+                        label=f"{fit_title} fit",
+                    )
+                    plotted_items_count += 1
 
     # Plot models
     model_lines = []
@@ -329,7 +454,7 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
                          params["x_range"] = (x_min, x_max, 1000)
                 if "x_range" not in params: # Fallback to histogram edges
                     try:
-                        _, edges = hist.to_numpy()[:2]
+                        (_, edges), _ = histogram_to_numpy(hist, config)
                         params["x_range"] = (edges[0], edges[-1], 1000)
                     except Exception:
                          params["x_range"] = (0, 10, 1000) # Default if edges fail
@@ -364,6 +489,7 @@ def process_TH1(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
     if y_limits and y_limits[0] is not None and y_limits[1] is not None:
         ax.set_ylim(y_limits)
     ax.set_yscale("log" if log_y else "linear")
+    apply_axis_multipliers(ax, config)
 
     # Add histogram statistics boxes
     if show_stats:
@@ -402,7 +528,8 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 
     hist: HistogramType = hist_list[0]
     try:
-        data, x_edges, y_edges = hist.to_numpy()
+        result, _ = histogram_to_numpy(hist, config)
+        data, x_edges, y_edges = result
     except Exception as e:
         print(f"Error converting histogram {getattr(hist, 'title', 'TH2')}: {e}", file=sys.stderr)
         return
@@ -417,10 +544,27 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
     show_stats = config.get("stats", False)
     show_colorbar = config.get("legend", True) # Use legend flag for colorbar
     rasterized = config.get("raster", True)
-    limits_config = config.get("limits", None) # [[xmin, xmax], [ymin, ymax]]
+    limits_config = config.get("limits", None) # [[xmin, xmax], [ymin, ymax], [min_count, max_count]]
 
-    limit_x = limits_config[0] if limits_config and len(limits_config) > 0 else (x_edges[0], x_edges[-1])
-    limit_y = limits_config[1] if limits_config and len(limits_config) > 1 else (y_edges[0], y_edges[-1])
+    def resolve_limits(index: int, default: Tuple[float, float]) -> Tuple[float, float]:
+        configured = limits_config[index] if limits_config and len(limits_config) > index else None
+        if configured is None:
+            return default
+        return (
+            default[0] if configured[0] is None else configured[0],
+            default[1] if configured[1] is None else configured[1],
+        )
+
+    limit_x = resolve_limits(0, (x_edges[0], x_edges[-1]))
+    limit_y = resolve_limits(1, (y_edges[0], y_edges[-1]))
+    limit_count = resolve_limits(2, (-np.inf, np.inf))
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+    plot_mask = (
+        (x_centers[:, None] >= limit_x[0]) & (x_centers[:, None] <= limit_x[1]) &
+        (y_centers[None, :] >= limit_y[0]) & (y_centers[None, :] <= limit_y[1]) &
+        (data >= limit_count[0]) & (data <= limit_count[1])
+    )
 
     ##### Alternative plotting using pcolormesh (turned out not to be suitable)
 
@@ -445,7 +589,8 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 
     ##### Plot using PolyCollection
     
-    maxcount = data.max()
+    plotted_data = data[plot_mask]
+    maxcount = plotted_data.max() if plotted_data.size else 1.0
     
     # Create vertices for each quad
     verts = []
@@ -453,7 +598,7 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 
     for i in range(len(x_edges)-1):
         for j in range(len(y_edges)-1):
-            if data[i,j] > 0:  # Only add non-zero bins
+            if plot_mask[i, j] and data[i,j] > 0:  # Only add bins within all requested limits
                 quad = [
                     (x_edges[i], y_edges[j]),
                     (x_edges[i+1], y_edges[j]),
@@ -480,19 +625,13 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 
     ##### Format Histogram
     
-    if limits_config is None:
-        limit_x = (x_edges[0], x_edges[-1])
-        limit_y = (y_edges[0], y_edges[-1])
-    else: 
-        limit_x = limits_config[0]
-        limit_y = limits_config[1]
-
     # Set limits and labels
     ax.set_xlim(limit_x)
     ax.set_ylim(limit_y)
     
     ax.set_xlabel(rf"{config.get('x-label')}")
     ax.set_ylabel(rf"{config.get('y-label')}")
+    apply_axis_multipliers(ax, config)
 
     # Add statistics box
     if show_stats:
@@ -529,7 +668,8 @@ def process_TH2(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 def add_flat_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, raster: bool, norm, config: PlotConfig) -> None:
     """Adds a TH3 histogram as flat 2D slices to a 3D axis."""
     try:
-        data, x_edges, y_edges, z_edges = hist.to_numpy()
+        result, _ = histogram_to_numpy(hist, config)
+        data, x_edges, y_edges, z_edges = result
     except Exception as e:
         print(f"Error converting histogram {getattr(hist, 'title', 'TH3')}: {e}", file=sys.stderr)
         return
@@ -577,16 +717,11 @@ def add_flat_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, raster: 
 def add_3d_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, norm, config: PlotConfig) -> None:
     """Adds a TH3 histogram as 3D bars to a 3D axis."""
     try:
-        data, x_edges, y_edges, z_edges = hist.to_numpy()
+        result, _ = histogram_to_numpy(hist, config)
+        data, x_edges, y_edges, z_edges = result
     except Exception as e:
         print(f"Error converting histogram {getattr(hist, 'title', 'TH3')}: {e}", file=sys.stderr)
         return
-
-    dx = x_edges[1] - x_edges[0] if len(x_edges) > 1 else 1
-    dy = y_edges[1] - y_edges[0] if len(y_edges) > 1 else 1
-    dz = z_edges[1] - z_edges[0] if len(z_edges) > 1 else 1
-
-    maxcount = norm.vmax
 
     # Iterate through bins
     for ix in range(len(x_edges)-1):
@@ -599,7 +734,10 @@ def add_3d_TH3(ax: plt.Axes, hist: HistogramType, cmap, alpha: float, norm, conf
                     # Apply alpha to the color tuple
                     final_color = (*color[:3], alpha)
 
-                    # Add bar3d for the bin
+                    # Use each rebinned bin's actual extent on every axis.
+                    dx = x_edges[ix + 1] - x_edges[ix]
+                    dy = y_edges[iy + 1] - y_edges[iy]
+                    dz = z_edges[iz + 1] - z_edges[iz]
                     ax.bar3d(x_edges[ix], y_edges[iy], z_edges[iz], dx, dy, dz,
                              color=final_color, shade=alpha > 0.8) # Shade if mostly opaque
 
@@ -632,7 +770,8 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
 
     # Determine normalization based on data and log_z for color mapping
     try:
-        data, x_edges, y_edges, z_edges = hist.to_numpy()
+        result, _ = histogram_to_numpy(hist, config)
+        data, x_edges, y_edges, z_edges = result
         vmax = data.max()
         vmin = None
         if log_z:
@@ -666,6 +805,7 @@ def process_TH3(ax: plt.Axes, hist_list: List[HistogramType], config: PlotConfig
     # Labels and grid
     ax.set_xlabel(config.get("x-label", "X"))
     ax.set_ylabel(config.get("y-label", "Y"))
+    apply_axis_multipliers(ax, config)
     zlabel_text = config.get("z-label", "Z")
     zlabel = ax.set_zlabel(zlabel_text) # Store the Z-label artist
 
@@ -698,7 +838,7 @@ def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType], config: PlotCon
 
     names = config.get("names", [getattr(h, 'title', f'Graph {i}') for i, h in enumerate(hist_list)])
     colors = config.get("colors", [])
-    color_palette = config.get("palette", "color1")
+    color_palette = config.get("palette", "color0")
     alphas = config.get("alphas", [])
     log_x = config.get("x-log", False)
     log_y = config.get("y-log", False)
@@ -774,6 +914,7 @@ def process_TGraph(ax: plt.Axes, hist_list: List[HistogramType], config: PlotCon
     ax.set_ylabel(config.get("y-label", "Y"))
     ax.set_xscale("log" if log_x else "linear")
     ax.set_yscale("log" if log_y else "linear")
+    apply_axis_multipliers(ax, config)
 
     if config.get("grid", False): # Add grid option
         ax.grid(True, linestyle='--', alpha=0.6)
@@ -810,6 +951,7 @@ def process_histograms(hist_list: List[HistogramType], config: PlotConfig) -> Tu
 
     # Create figure
     fig = plt.figure(figsize=config.get("figsize", (8, 6))) # Configurable figure size
+    apply_background(fig, None, config)
 
     # Determine plot type and call processor
     ax = None
@@ -819,7 +961,10 @@ def process_histograms(hist_list: List[HistogramType], config: PlotConfig) -> Tu
     elif isinstance(first_hist, uproot.behaviors.TH2.TH2):
         ax = fig.add_subplot(111)
         process_TH2(ax, hist_list, config)
-    elif isinstance(first_hist, uproot.behaviors.TH3.TH3):
+    elif isinstance(first_hist, uproot.behaviors.TH3.TH3) or (
+        getattr(first_hist, "classname", "") == "TH3"
+        and callable(getattr(first_hist, "to_numpy", None))
+    ):
         ax = fig.add_subplot(111, projection='3d')
         zlabel_artist = process_TH3(ax, hist_list, config)
         if zlabel_artist: extra_artists.append(zlabel_artist)
@@ -832,6 +977,7 @@ def process_histograms(hist_list: List[HistogramType], config: PlotConfig) -> Tu
         return None, title, []
 
     if ax:
+        apply_background(fig, ax, config)
         ax.set_title(title) # Set title on the axes
         # Add legend artists to extra_artists if legend exists
         legend = ax.get_legend()

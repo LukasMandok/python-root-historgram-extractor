@@ -20,6 +20,8 @@ The existing plotting functionality is preserved during the refactor. Depending 
 - TF1 objects where supported by the existing plotting/model workflow
 - Multiple histograms and optional stacking/selection
 - Linear and logarithmic axes
+- Optional x- and y-axis multipliers for displayed tick values
+- Configurable plot background color, including transparent mode
 - Axis limits
 - Legends
 - Histogram statistics boxes
@@ -53,8 +55,51 @@ The existing plotting functionality is preserved during the refactor. Depending 
 The public package API is exported from `lib`:
 
 ```python
-from lib import PlotConfig, plot_from_root
+from root_extractor import PlotConfig, plot_from_root
 ```
+
+Histograms can optionally be rebinned by physical bin width. Use a number or
+one-item list for TH1, and one value per axis for TH2/TH3. `None` leaves an
+axis unchanged:
+
+```python
+config = PlotConfig({"bin_width": [1.0, 0.4]})  # TH2: X and Y widths
+figure = plot_from_root(root_file, paths=[["detector", "position"]], config=config)
+```
+
+For TH1, `bin_width=1`, `bin_width=[1]`, and `bin_width=[None]` are valid.
+Requested widths must align with existing histogram edges.
+
+### Combining 2D histograms into a 3D histogram
+
+The library can materialize one TH2 from each of several ROOT files and stack
+them as consecutive slices of a TH3-like object. This uses uproot and NumPy;
+PyROOT is not required unless a native ROOT object is needed by downstream
+code.
+
+```python
+from root_extractor import combine_histograms_3d, load_histograms
+
+histograms = load_histograms(
+    ["slice_01.root", "slice_02.root", "slice_03.root"],
+    "detector/position",
+)
+combined = combine_histograms_3d(
+    histograms,
+    z_edges=[0.0, 10.0, 20.0, 30.0],
+    title="Detector position by slice",
+)
+
+# Compatible with the existing TH3 plotting code:
+values, x_edges, y_edges, z_edges = combined.to_numpy()
+
+# Only when a PyROOT TH3D is required:
+root_histogram = combined.to_pyroot("detector_position_3d")
+```
+
+The input histograms must have identical X and Y bin edges. Their order is
+preserved along Z; if `z_edges` is omitted, the slices use edges `0, 1, ...,
+N`. `to_pyroot()` raises a clear `ImportError` when PyROOT is unavailable.
 
 ## Installation
 
@@ -144,7 +189,7 @@ Only the matching histogram primitive is extracted and plotted. The lower-level 
 Canvas histograms are also discovered automatically when a normal path query does not find ordinary ROOT objects. For example, this plots the matching histogram without knowing that it is stored in a canvas:
 
 ```python
-from lib import plot_from_root
+from root_extractor import plot_from_root
 
 figure = plot_from_root(
     "/home/mue/mandok/musr/Cone_BeamSpot/Plots/Cone_OverviewDownStream_Runs334To3723_250121172837.root",
@@ -449,7 +494,7 @@ The main reason for the refactor is that plotting can now be used without invoki
 ### Minimal example
 
 ```python
-from lib import PlotConfig, plot_from_root
+from root_extractor import PlotConfig, plot_from_root
 
 config = PlotConfig()
 
@@ -493,7 +538,7 @@ No CLI arguments, cache files, output directories, SVG optimization, or external
 ### Create and override configuration
 
 ```python
-from lib import PlotConfig
+from root_extractor import PlotConfig
 
 config = PlotConfig({
     "title": "Muon spectrum",
@@ -604,7 +649,7 @@ This is particularly useful for applications that have their own database, cache
 A typical notebook workflow can be kept very small:
 
 ```python
-from lib import PlotConfig, plot_from_root
+from root_extractor import PlotConfig, plot_from_root
 
 config = PlotConfig({
     "title": "Correlation",
@@ -714,7 +759,7 @@ pip install -e .
 Then test the public import:
 
 ```bash
-python -c "from lib import PlotConfig, plot_from_root; print(PlotConfig, plot_from_root)"
+python -c "from root_extractor import PlotConfig, plot_from_root; print(PlotConfig, plot_from_root)"
 ```
 
 A real ROOT-file test requires a ROOT file containing one of the supported histogram/object classes.

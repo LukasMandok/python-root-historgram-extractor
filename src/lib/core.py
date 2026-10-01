@@ -7,6 +7,9 @@ optimization, or opening generated files.
 """
 
 from pathlib import Path
+import json
+import shutil
+import subprocess
 from typing import List, Optional, Sequence, Union
 from contextlib import suppress
 from .canvas import (
@@ -34,6 +37,7 @@ def _find_matching_keys(
     paths: Sequence[HistogramPath],
     *,
     stack: bool,
+    selection: str,
 ) -> List[str]:
     """Find histogram keys for the requested keyword paths.
 
@@ -45,7 +49,13 @@ def _find_matching_keys(
     for path_keywords in paths:
         should_stack = stack or (len(paths) > 1 and len(path_keywords) > 1)
         matching_keys.extend(
-            find_histograms(root_file, list(path_keywords), should_stack, quiet=True)
+            find_histograms(
+                root_file,
+                list(path_keywords),
+                should_stack,
+                quiet=True,
+                selection=selection,
+            )
         )
 
     if not matching_keys:
@@ -63,6 +73,8 @@ def _find_matching_keys(
                         matches,
                         {reference: reference.split("|title=", 1)[-1] for reference in matches},
                         stack=stack,
+                        selection=selection,
+                        query="".join(path_keywords),
                         display_paths={
                             reference: (
                                 f"canvas/{canvas}/pad_{pad}/{name}"
@@ -114,6 +126,53 @@ def _load_histograms(root_file, matching_keys: Sequence[str], root_path: Path):
     return hist_list, temporary_roots, temporary_paths
 
 
+def _attach_embedded_fits(
+    root_path: Path,
+    matching_keys: Sequence[str],
+    hist_list: Sequence,
+) -> None:
+    """Attach sampled TF1 functions stored in selected TH1 objects."""
+    root_command = shutil.which("root")
+    if root_command is None:
+        raise RuntimeError("Plotting embedded fits requires the CERN ROOT executable on PATH.")
+
+    for key, hist in zip(matching_keys, hist_list):
+        if is_canvas_reference(key) or "TH1" not in getattr(hist, "classname", ""):
+            continue
+
+        root_key = key.split(";", 1)[0]
+        expression = (
+            f"TFile *input=TFile::Open({json.dumps(str(root_path))}); "
+            f"if(!input||input->IsZombie()) gSystem->Exit(2); "
+            f"TH1 *hist=(TH1*)input->Get({json.dumps(root_key)}); "
+            f"if(!hist) gSystem->Exit(3); "
+            f"TIter functions(hist->GetListOfFunctions()); TObject *object; "
+            f"while((object=functions())) {{ if(!object->InheritsFrom(\"TF1\")) continue; "
+            f"TF1 *fit=(TF1*)object; int count=fit->GetNpx(); "
+            f"for(int i=0;i<count;++i) {{ double x=fit->GetXmin()+(fit->GetXmax()-fit->GetXmin())*i/(count-1); "
+            f"std::cout << \"__EMBEDDED_FIT__\\t\" << x << \"\\t\" << fit->Eval(x) << std::endl; }} "
+            f"std::cout << \"__EMBEDDED_FIT_TITLE__\\t\" << fit->GetName() << std::endl; break; }} "
+            f"input->Close();"
+        )
+        result = subprocess.run(
+            [root_command, "-l", "-b", "-q", "-e", expression],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        fit_values = []
+        fit_title = "embedded fit"
+        for line in result.stdout.splitlines():
+            if line.startswith("__EMBEDDED_FIT__\t"):
+                _, x_value, y_value = line.split("\t", 2)
+                fit_values.append((float(x_value), float(y_value)))
+            elif line.startswith("__EMBEDDED_FIT_TITLE__\t"):
+                fit_title = line.split("\t", 1)[1]
+        if fit_values:
+            hist._embedded_fit_points = tuple(zip(*fit_values))
+            hist._embedded_fit_title = fit_title
+
+
 def plot_from_root(
     root_path: PathLike,
     paths: Optional[Sequence[HistogramPath]] = None,
@@ -121,6 +180,7 @@ def plot_from_root(
     config: Optional[PlotConfig] = None,
     histogram_keys: Optional[Sequence[str]] = None,
     stack: bool = False,
+    selection: str = "prompt",
 ) -> Figure:
     """Read ROOT histograms and return their Matplotlib figure.
 
@@ -142,6 +202,9 @@ def plot_from_root(
         When supplied, ``paths`` is ignored.
     stack:
         Request stacking behavior when supported by ``find_histograms``.
+    selection:
+        Resolve ambiguous keyword matches with ``"prompt"`` (the default) or
+        choose the closest matching histogram basename with ``"most_similar"``.
 
     Returns
     -------
@@ -176,7 +239,12 @@ def plot_from_root(
             if histogram_keys is not None:
                 matching_keys = list(histogram_keys)
             else:
-                matching_keys = _find_matching_keys(root_file, paths or [], stack=stack)
+                matching_keys = _find_matching_keys(
+                    root_file,
+                    paths or [],
+                    stack=stack,
+                    selection=selection,
+                )
 
             if not matching_keys:
                 raise ValueError("No histograms matched the requested selection.")
@@ -199,6 +267,8 @@ def plot_from_root(
 
         # Resolve all histogram-dependent defaults exactly once before plotting.
         refresh_config(hist_list, plot_config)
+        if plot_config.get("fits", False):
+            _attach_embedded_fits(root_file_path, matching_keys, hist_list)
 
         # process_histograms configures rcParams for the plot. Keep that style
         # local to this API call instead of leaking it into the host application.

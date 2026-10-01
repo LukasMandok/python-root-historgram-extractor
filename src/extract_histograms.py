@@ -113,7 +113,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     direct_keys = {
         "title", "limits", "legend", "stats", "errors", "colors", "palette",
         "alphas", "thickness", "grid", "models", "cutoff", "flat",
-        "angles", "raster",
+        "angles", "raster", "bin_width",
     }
 
     for key in direct_keys:
@@ -528,6 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     plot_group = parser.add_argument_group("Plotting Configuration (Overrides cache/defaults)")
     plot_group.add_argument("--title", nargs="?", const="", default=argparse.SUPPRESS)
     plot_group.add_argument("--limits", type=parse_limits, default=argparse.SUPPRESS)
+    plot_group.add_argument("--bin-width", nargs="+", type=float, default=argparse.SUPPRESS, dest="bin_width")
     plot_group.add_argument("--legend", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS)
     plot_group.add_argument("--stats", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS)
     plot_group.add_argument("--errors", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS)
